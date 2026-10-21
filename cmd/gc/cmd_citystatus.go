@@ -567,7 +567,6 @@ func doCityStatusWithStoreAndSnapshot(
 	stdout, stderr io.Writer,
 ) int {
 	snapshot := collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, statusSnapshot, stderr)
-	renderCityStatusText(snapshot, dops, stdout)
 
 	// Track session-snapshot degradation so we can render the textual report
 	// AND signal the failure via exit code. Restores the pre-#2005 contract
@@ -580,12 +579,17 @@ func doCityStatusWithStoreAndSnapshot(
 			fmt.Fprintf(stderr, "gc status: building session catalog: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if sessions.ActiveSessions > 0 || sessions.SuspendedSessions > 0 {
-			fmt.Fprintln(stdout)                                                                                            //nolint:errcheck // best-effort stdout
-			fmt.Fprintf(stdout, "Sessions: %d active, %d suspended\n", sessions.ActiveSessions, sessions.SuspendedSessions) //nolint:errcheck // best-effort stdout
-		}
+		snapshot.Summary.ActiveSessions = sessions.ActiveSessions
+		snapshot.Summary.SuspendedSessions = sessions.SuspendedSessions
 	}
 
+	// Session catalog is needed before the first Agents summary: rendering
+	// early falsely printed 0/N even while demand sessions were active.
+	renderCityStatusText(snapshot, dops, stdout)
+	if snapshot.Summary.ActiveSessions > 0 || snapshot.Summary.SuspendedSessions > 0 {
+		fmt.Fprintln(stdout)                                                                                                            //nolint:errcheck // best-effort stdout
+		fmt.Fprintf(stdout, "Sessions: %d active, %d suspended\n", snapshot.Summary.ActiveSessions, snapshot.Summary.SuspendedSessions) //nolint:errcheck // best-effort stdout
+	}
 	if snapshotDegraded {
 		return 1
 	}
