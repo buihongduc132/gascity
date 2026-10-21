@@ -330,3 +330,33 @@ func TestPartialAgentProbeDoesNotHideActiveDemandSessions(t *testing.T) {
 		t.Fatalf("partial status lost active sessions or treated unknown as stopped: %s", output)
 	}
 }
+
+// Read-only store-health/readiness failures must not corrupt worker liveness.
+func TestStoreReadPartialIsNotAgentStateUnknown(t *testing.T) {
+	snap := fleetSnapshot(2, 15, true, []string{
+		"city work ready: reading complete ready projection from cache: bead cache unavailable",
+		"store health: counting retained bead rows: hydrating list fallback: list timed out: context deadline exceeded",
+	})
+	status := cityStatusJSONFromSnapshot(snap, snap.Summary)
+	if status.Summary.UnknownAgents != 0 || slices.Contains(status.Health.Signals, "agent_state_unknown") {
+		t.Fatalf("optional Dolt scan caused false worker-health failure: %+v", status)
+	}
+	if !slices.Contains(status.Health.Signals, "status_data_partial") || !status.Health.Degraded || !status.Partial {
+		t.Fatalf("must preserve independent store read degradation: %+v", status)
+	}
+	out := renderFleet(t, snap)
+	if strings.Contains(out, "unknown  (partial status)") || !strings.Contains(out, "2/15") {
+		t.Fatalf("expected observed worker states plus partial work warning: %s", out)
+	}
+}
+
+func TestSessionReadPartialStillReportsUnknown(t *testing.T) {
+	snap := fleetSnapshot(2, 15, true, []string{
+		"sessions: loading session snapshot timed out after 1s",
+		"store health: counting retained bead rows: hydrating list fallback: list timed out",
+	})
+	status := cityStatusJSONFromSnapshot(snap, snap.Summary)
+	if status.Summary.UnknownAgents != 13 || !slices.Contains(status.Health.Signals, "agent_state_unknown") {
+		t.Fatalf("session read must retain unknown conservatively: %+v", status)
+	}
+}

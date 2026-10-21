@@ -457,6 +457,9 @@ func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSumma
 	if snapshot.Suspended {
 		signals = append(signals, "city_suspended")
 	}
+	if snapshot.Partial && !agentObservationIncomplete(snapshot) && len(snapshot.PartialErrors) > 0 {
+		signals = append(signals, "status_data_partial")
+	}
 	if !snapshot.Controller.Running {
 		signals = append(signals, "controller_not_running")
 	}
@@ -474,7 +477,7 @@ func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSumma
 	// could contradict the numbers printed beside it. Both production callers
 	// pass snapshot.Summary, so this changes nothing today; it keeps all three
 	// values on one source if that ever stops being true.
-	unknownAgents := unknownAgentCount(summary.RunningAgents, summary.TotalAgents, snapshot.Partial)
+	unknownAgents := unknownAgentCount(summary.RunningAgents, summary.TotalAgents, agentObservationIncomplete(snapshot))
 	switch {
 	case unknownAgents > 0:
 		signals = append(signals, "agent_state_unknown")
@@ -532,6 +535,33 @@ func padStatusName(name string, width int) string {
 		return name + strings.Repeat(" ", statusNameColumnGutter)
 	}
 	return name + strings.Repeat(" ", width-n)
+}
+
+// agentObservationIncomplete separates partial agent/session probes from
+// unrelated work, mail and store-health reads. Optional Dolt cache failures
+// must not label all unused pool capacity "unknown" if runtime probes succeeded.
+// Unrecognized errors remain conservative.
+func agentObservationIncomplete(snapshot cityStatusSnapshot) bool {
+	if !snapshot.Partial {
+		return false
+	}
+	if len(snapshot.PartialErrors) == 0 {
+		return true
+	}
+	for _, reason := range snapshot.PartialErrors {
+		switch {
+		case strings.HasPrefix(reason, "store health:"),
+			strings.HasPrefix(reason, "mail:"),
+			strings.Contains(reason, " work ready:"),
+			strings.Contains(reason, " work in_progress:"),
+			strings.Contains(reason, " work blocked:"),
+			strings.Contains(reason, " work closed:"):
+			// These are not agent state readings.
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // unknownAgentCount is how many agent rows the runtime probe never answered
@@ -598,15 +628,15 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 			if row.ScaleLabel != "" {
 				fmt.Fprintf(stdout, "  %s%s\n", padStatusName(row.GroupName, statusNameColumnWidth), row.ScaleLabel) //nolint:errcheck // best-effort stdout
 			}
-			status := agentStatusLineWithPartial(row.Agent.Running, dops, row.SessionName, row.Agent.Suspended, snapshot.Partial)
+			status := agentStatusLineWithPartial(row.Agent.Running, dops, row.SessionName, row.Agent.Suspended, agentObservationIncomplete(snapshot))
 			if row.Expanded {
 				fmt.Fprintf(stdout, "    %s%s\n", padStatusName(row.Agent.QualifiedName, statusNameColumnWidth-2), status) //nolint:errcheck // best-effort stdout
 			} else {
 				fmt.Fprintf(stdout, "  %s%s\n", padStatusName(row.Agent.QualifiedName, statusNameColumnWidth), status) //nolint:errcheck // best-effort stdout
 			}
 		}
-		fmt.Fprintln(stdout)                                                                                                                                                //nolint:errcheck // best-effort stdout
-		fmt.Fprintln(stdout, agentSummaryLineWithSessions(snapshot.Summary.RunningAgents, snapshot.Summary.TotalAgents, snapshot.Partial, snapshot.Summary.ActiveSessions)) //nolint:errcheck // best-effort stdout
+		fmt.Fprintln(stdout)                                                                                                                                                                    //nolint:errcheck // best-effort stdout
+		fmt.Fprintln(stdout, agentSummaryLineWithSessions(snapshot.Summary.RunningAgents, snapshot.Summary.TotalAgents, agentObservationIncomplete(snapshot), snapshot.Summary.ActiveSessions)) //nolint:errcheck // best-effort stdout
 		// Why the count is not a measurement belongs next to the count.
 		// PartialErrors reached the JSON payload but never stdout, so a
 		// reader piping stdout got the number while its caveat sat on
