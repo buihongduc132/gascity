@@ -138,3 +138,18 @@ func TestStatusProviderTimeoutMarksPartial(t *testing.T) {
 		t.Fatal("statusProviderPartial = false, want true after runtime probe timeout")
 	}
 }
+
+// Loaded hosts legitimately take longer than 50 ms to answer a runtime probe.
+// A moderately slow successful response must not mark a healthy worker unknown.
+func TestStatusProviderModerateLatencyStillObservesRunningWorker(t *testing.T) {
+	base := newStatusProbeProvider()
+	base.running.Store(true)
+	base.delay.Store(int64(140 * time.Millisecond))
+	wrapped := newBoundedStatusProvider(base)
+	if !wrapped.IsRunning("worker") {
+		t.Fatal("live worker became unknown because the observation deadline was too aggressive")
+	}
+	if statusProviderPartial(wrapped) {
+		t.Fatal("successful runtime observation marked entire status partial")
+	}
+}
