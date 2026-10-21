@@ -2010,3 +2010,64 @@ func TestSubmitDefaultDeferredRestartRequestedKeepsCurrentEpoch(t *testing.T) {
 		t.Fatalf("ContinuationEpoch = %q, want 4 (plain restart keeps the current epoch)", got)
 	}
 }
+
+func TestSubmit_DrainingSessionTransitionsToActiveAndDelivers(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	workDir := t.TempDir()
+	sessionName := "s-draining-submit"
+	if err := sp.Start(context.Background(), sessionName, runtime.Config{WorkDir: workDir, Command: "gemini"}); err != nil {
+		t.Fatalf("fake Start: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   BeadType,
+		Labels: []string{LabelSession, "template:helper"},
+		Metadata: map[string]string{
+			"template":     "helper",
+			"state":        string(StateDraining),
+			"state_reason": DrainAckStopPendingReason,
+			"drain_at":     time.Now().UTC().Format(time.RFC3339),
+			"provider":     "gemini",
+			"command":      "gemini",
+			"work_dir":     workDir,
+			"session_name": sessionName,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create bead: %v", err)
+	}
+
+	outcome, err := mgr.Submit(context.Background(), created.ID, "wake from drain", "gemini", runtime.Config{WorkDir: workDir}, SubmitIntentDefault)
+	if err != nil {
+		t.Fatalf("Submit(default): %v", err)
+	}
+	if outcome.Queued {
+		t.Fatal("Submit(default) unexpectedly queued")
+	}
+
+	updated, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get updated bead: %v", err)
+	}
+	if got := updated.Metadata["state"]; got != string(StateActive) {
+		t.Fatalf("state = %q, want %q", got, StateActive)
+	}
+	if got := updated.Metadata["drain_at"]; got != "" {
+		t.Fatalf("drain_at = %q, want cleared", got)
+	}
+
+	delivered := false
+	for _, call := range sp.Calls {
+		if (call.Method == "Nudge" || call.Method == "NudgeNow") && call.Name == sessionName && call.Message == "wake from drain" {
+			delivered = true
+			break
+		}
+	}
+	if !delivered {
+		t.Fatalf("calls = %#v, want Nudge/NudgeNow(wake from drain)", sp.Calls)
+	}
+}
+

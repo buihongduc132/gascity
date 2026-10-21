@@ -194,7 +194,7 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 		// residual busy rejection briefly.
 		p.waitPaneShellReady(ctx, paneID)
 		for attempt := 0; ; attempt++ {
-			info, adopted, err = p.startAgentAdopting(ctx, name, spec.Kind, paneID, spec.Args)
+			info, adopted, err = p.startAgentAdopting(ctx, name, spec.Kind, paneID, spec.Args, cfg.ProcessNames)
 			if err == nil || herdrErrorCode(err) != "agent_pane_busy" || attempt >= paneBusyRetries {
 				break
 			}
@@ -648,9 +648,18 @@ func (p *Provider) processAliveByPane(ctx context.Context, name, paneID string, 
 // (version-robust, unlike matching claude ≥2.1.x's comm strings). adopted is
 // true only when an already-running holder was adopted, so the caller can
 // skip re-priming a live agent.
-func (p *Provider) startAgentAdopting(ctx context.Context, name, kind, paneID string, args []string) (info agentInfo, adopted bool, err error) {
+func (p *Provider) startAgentAdopting(ctx context.Context, name, kind, paneID string, args []string, processNames []string) (info agentInfo, adopted bool, err error) {
 	hn := herdrAgentName(name) // herdr ≥0.7.5 rejects raw gc session names (invalid_agent_name)
 	started, startErr := p.c.startAgentKind(ctx, hn, kind, paneID, args)
+	if startErr != nil && herdrErrorCode(startErr) == "agent_pane_busy" && paneID != "" {
+		wantNames := processNames
+		if len(wantNames) == 0 && kind != "" {
+			wantNames = []string{kind}
+		}
+		if p.processAliveByPane(ctx, name, paneID, wantNames) {
+			return agentInfo{PaneID: paneID}, true, nil
+		}
+	}
 	return resolveAgentNameTaken(started, startErr, agentStartOps{
 		getAgent: func() (agentInfo, bool, error) { return p.c.getAgent(ctx, herdrAgentName(name)) },
 		paneAlive: func(holderPane string) bool {

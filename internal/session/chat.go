@@ -774,9 +774,12 @@ func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead) error {
 	}
 	batch := make(map[string]string)
 	switch State(b.Metadata["state"]) {
-	case "", StateStartPending, StateCreating, StateAsleep, StateSuspended:
+	case "", StateStartPending, StateCreating, StateAsleep, StateSuspended, StateDraining:
 		batch["state"] = string(StateActive)
 		batch["state_reason"] = "creation_complete"
+		if State(b.Metadata["state"]) == StateDraining || strings.TrimSpace(b.Metadata["drain_at"]) != "" {
+			batch["drain_at"] = ""
+		}
 	}
 	if strings.TrimSpace(b.Metadata["pending_create_claim"]) != "" {
 		batch["pending_create_claim"] = ""
