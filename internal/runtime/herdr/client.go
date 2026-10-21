@@ -239,9 +239,10 @@ func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...
 	return env.Result, nil
 }
 
-// agentInfo mirrors herdr's agent object. Verified live against herdr 0.7.3:
-// the per-entry name field is emitted under the JSON key "agent", not "name"
-// (`herdr agent list` → {"agents":[{"agent":"act-a","agent_status":"idle",...}]}).
+// agentInfo keeps a stable GC-side Name across Herdr versions. Herdr 0.7.3
+// reported the identity as "agent"; Herdr 0.9.3 reports agent KIND in "agent"
+// and the actual unique identity in "name". Reading "agent" unconditionally
+// collapses every agy session to the string "agy" and breaks list lookups.
 type agentInfo struct {
 	Name        string `json:"agent"`
 	PaneID      string `json:"pane_id"`
@@ -255,6 +256,24 @@ type agentInfo struct {
 	// Verified live on 0.7.3: it moves only while a client renders the pane;
 	// a headless server holds it at 0.
 	Revision uint64 `json:"revision"`
+}
+
+// UnmarshalJSON prefers Herdr 0.9.3's explicit identity, falling back to
+// the 0.7.3 "agent" identity when the modern field is absent.
+func (a *agentInfo) UnmarshalJSON(data []byte) error {
+	type legacyAgentInfo agentInfo
+	var wire struct {
+		legacyAgentInfo
+		Identity string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*a = agentInfo(wire.legacyAgentInfo)
+	if wire.Identity != "" {
+		a.Name = wire.Identity
+	}
+	return nil
 }
 
 // startupBootBudgetMS is the bound every wait that can land inside an agent's

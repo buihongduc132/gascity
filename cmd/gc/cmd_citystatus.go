@@ -120,15 +120,26 @@ type StoreHealth struct {
 }
 
 var (
-	observeSessionTargetForStatus = workerObserveSessionTargetWithConfig
+	observeSessionTargetForStatus = statusObserveRuntimeLivenessOnly
 	openCityStoreAtForStatus      = openCityStoreResultAt
 )
 
 var (
 	controllerStatusStandaloneFallbackTimeout = 250 * time.Millisecond
-	statusObservationTimeout                  = 750 * time.Millisecond
+	statusObservationTimeout                  = 2200 * time.Millisecond
 	statusSessionSnapshotTimeout              = 3 * time.Second
 )
+
+// statusObserveRuntimeLivenessOnly probes presence without worker activity or
+// metadata lookups. The overview needs running/alive, not last activity, and
+// slow Herdr activity reads must not erase a successful liveness result.
+func statusObserveRuntimeLivenessOnly(_ string, _ beads.Store, sp runtime.Provider, _ *config.City, name string) (worker.LiveObservation, error) {
+	liveness, err := runtime.ObserveLivenessWithError(sp, name, nil)
+	if err != nil {
+		return worker.LiveObservation{}, err
+	}
+	return worker.LiveObservation{Running: liveness.Running, Alive: liveness.Alive, SessionName: name}, nil
+}
 
 // newStatusCmd creates the "gc status [path]" command.
 func newStatusCmd(stdout, stderr io.Writer) *cobra.Command {

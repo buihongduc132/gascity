@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	statusProviderCallTimeout    = 750 * time.Millisecond
+	statusProviderCallTimeout    = 1500 * time.Millisecond
 	statusProviderTimeoutWarning = func() {
 		fmt.Fprintln(os.Stderr, "gc status: runtime status probe timed out; using partial status")
 	}
