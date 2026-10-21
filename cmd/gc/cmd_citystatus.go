@@ -219,7 +219,7 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 		return 1
 	}
 	dops := newDrainOps(sp)
-	c, reason := cityStatusAPIClient(cityPath)
+	c, reason := selectedStatusAPIClient(cityPath)
 	return routeCityStatus(cityPath, cfg, sp, dops, c, reason, jsonOutput, stdout, stderr)
 }
 
@@ -238,6 +238,16 @@ func cmdCityStatus(args []string, jsonOutput bool, stdout, stderr io.Writer) int
 // response. Status has a local fallback (unlike maintenance), so this
 // change only affects the ROUTE picked, not the correctness of either path.
 var cityStatusAPIClient = supervisorFallthroughAPIClient
+
+// selectedStatusAPIClient bypasses a supervisor status cache that still runs
+// an older liveness reader. Status-only GitOps clients use the corrected local
+// reader without restarting supervisor or disturbing live Herdr sessions.
+func selectedStatusAPIClient(cityPath string) (*api.Client, string) {
+	if os.Getenv("GC_STATUS_FORCE_LOCAL") == "1" {
+		return nil, "local-liveness-override"
+	}
+	return cityStatusAPIClient(cityPath)
+}
 
 // routeCityStatus dispatches `gc status` to the supervisor API when a
 // controller is up; otherwise falls back to the local snapshot builder.
