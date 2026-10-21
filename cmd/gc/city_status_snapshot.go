@@ -478,7 +478,7 @@ func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSumma
 	switch {
 	case unknownAgents > 0:
 		signals = append(signals, "agent_state_unknown")
-	case summary.TotalAgents > 0 && summary.RunningAgents == 0:
+	case summary.TotalAgents > 0 && summary.RunningAgents == 0 && summary.ActiveSessions == 0:
 		signals = append(signals, "no_agents_running")
 	}
 	summary.UnknownAgents = unknownAgents
@@ -562,6 +562,19 @@ func agentSummaryLine(running, total int, partial bool) string {
 	return fmt.Sprintf("%d/%d agents running", running, total)
 }
 
+// A zero running template-seat count is not evidence that no work is running:
+// independently created demand sessions are counted separately. Put those first
+// so humans and monitors do not mistake an idle demand-scaled pool for a stall.
+func agentSummaryLineWithSessions(running, total int, partial bool, active int) string {
+	if active <= 0 {
+		return agentSummaryLine(running, total, partial)
+	}
+	if unknown := unknownAgentCount(running, total, partial); unknown > 0 {
+		return fmt.Sprintf("%d active sessions; %d configured slots: %d running, %d unknown", active, total, running, unknown)
+	}
+	return fmt.Sprintf("%d active sessions; %d/%d configured agent slots running", active, running, total)
+}
+
 func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.Writer) {
 	fmt.Fprintf(stdout, "%s  %s\n", snapshot.CityName, snapshot.CityPath)                //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(stdout, "  Controller: %s\n", controllerStatusLine(snapshot.Controller)) //nolint:errcheck // best-effort stdout
@@ -592,8 +605,8 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 				fmt.Fprintf(stdout, "  %s%s\n", padStatusName(row.Agent.QualifiedName, statusNameColumnWidth), status) //nolint:errcheck // best-effort stdout
 			}
 		}
-		fmt.Fprintln(stdout)                                                                                                   //nolint:errcheck // best-effort stdout
-		fmt.Fprintln(stdout, agentSummaryLine(snapshot.Summary.RunningAgents, snapshot.Summary.TotalAgents, snapshot.Partial)) //nolint:errcheck // best-effort stdout
+		fmt.Fprintln(stdout)                                                                                                                                                //nolint:errcheck // best-effort stdout
+		fmt.Fprintln(stdout, agentSummaryLineWithSessions(snapshot.Summary.RunningAgents, snapshot.Summary.TotalAgents, snapshot.Partial, snapshot.Summary.ActiveSessions)) //nolint:errcheck // best-effort stdout
 		// Why the count is not a measurement belongs next to the count.
 		// PartialErrors reached the JSON payload but never stdout, so a
 		// reader piping stdout got the number while its caveat sat on

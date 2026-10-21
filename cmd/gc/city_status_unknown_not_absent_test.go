@@ -303,3 +303,30 @@ func TestUnknownAgentCount(t *testing.T) {
 		})
 	}
 }
+
+// A fleet of zero configured always-on agent seats may still be doing real
+// work through dynamic sessions, as it was on bhd-main2 during this incident.
+func TestActiveDemandSessionsDoNotDeclareNoAgentsRunning(t *testing.T) {
+	snapshot := fleetSnapshot(0, 16, false, nil)
+	snapshot.Summary.ActiveSessions = 6
+	status := cityStatusJSONFromSnapshot(snapshot, snapshot.Summary)
+	if slices.Contains(status.Health.Signals, "no_agents_running") {
+		t.Fatalf("active sessions exist, but health falsely reported no agents running: %#v", status.Health)
+	}
+	if status.Summary.ActiveSessions != 6 {
+		t.Fatalf("active_sessions = %d, want 6", status.Summary.ActiveSessions)
+	}
+	output := renderFleet(t, snapshot)
+	if !strings.Contains(output, "6 active sessions; 0/16 configured agent slots running") {
+		t.Fatalf("status hides active demand work behind zero idle seats: %s", output)
+	}
+}
+
+func TestPartialAgentProbeDoesNotHideActiveDemandSessions(t *testing.T) {
+	snapshot := fleetSnapshot(0, 16, true, []string{"injected runtime timeout"})
+	snapshot.Summary.ActiveSessions = 6
+	output := renderFleet(t, snapshot)
+	if !strings.Contains(output, "6 active sessions; 16 configured slots: 0 running, 16 unknown") {
+		t.Fatalf("partial status lost active sessions or treated unknown as stopped: %s", output)
+	}
+}
