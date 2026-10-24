@@ -844,12 +844,23 @@ func (c *client) tabClose(ctx context.Context, tabID string) error {
 // Start gets a clean shell with the right cwd/env and dead panes never
 // accumulate across restarts.
 func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd string, env map[string]string) (tabID, paneID string, err error) {
+	return c.ensurePlacementWithRetry(ctx, wsLabel, tabLabel, cwd, env, false)
+}
+
+// A Herdr workspace can disappear after workspace list and before tab create.
+// Re-resolve the label at most once; never close or compete with a matching
+// original tab discovered after that race. The old workspace ID is not a lease.
+func (c *client) ensurePlacementWithRetry(ctx context.Context, wsLabel, tabLabel, cwd string, env map[string]string, retried bool) (tabID, paneID string, err error) {
 	wsID, err := c.findWorkspace(ctx, wsLabel)
 	if err != nil {
 		return "", "", err
 	}
 	if wsID == "" {
-		// New workspace: repurpose the default tab herdr spawns for this agent.
+		// After losing a workspace, creating a replacement without proving the
+		// original writer is gone could put a second writer in the same worktree.
+		if retried {
+			return "", "", fmt.Errorf("herdr workspace %q disappeared; refusing new original-owner workspace without verified liveness", wsLabel)
+		}
 		tabID, paneID, err = c.workspaceCreate(ctx, wsLabel, cwd, env)
 		if err != nil {
 			return "", "", err
@@ -859,14 +870,24 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd str
 	}
 	tabs, err := c.listTabs(ctx, wsID)
 	if err != nil {
+		if !retried && herdrErrorCode(err) == "workspace_not_found" {
+			return c.ensurePlacementWithRetry(ctx, wsLabel, tabLabel, cwd, env, true)
+		}
 		return "", "", err
 	}
 	for _, tb := range tabs {
 		if tb.Label == tabLabel {
-			_ = c.tabClose(ctx, tb.TabID) // best-effort: replaced below either way
+			if retried {
+				return "", "", fmt.Errorf("herdr workspace %q moved while matching original tab %q exists; refusing competing writer or tab close", wsLabel, tb.TabID)
+			}
+			_ = c.tabClose(ctx, tb.TabID) // existing normal stale-tab reclamation; unchanged
 		}
 	}
-	return c.tabCreate(ctx, wsID, tabLabel, cwd, env)
+	tabID, paneID, err = c.tabCreate(ctx, wsID, tabLabel, cwd, env)
+	if err != nil && !retried && herdrErrorCode(err) == "workspace_not_found" {
+		return c.ensurePlacementWithRetry(ctx, wsLabel, tabLabel, cwd, env, true)
+	}
+	return tabID, paneID, err
 }
 
 // ── shared session-server lifecycle ──────────────────────────────────────────
