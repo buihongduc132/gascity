@@ -9,7 +9,7 @@ import type { SupervisorMailItem } from '../supervisor/mailReads';
 // conventions in the data:
 //
 // - Beads: ID is `<project>-<suffix>` where suffix is alnum, optionally
-//   followed by `.N` (e.g. `gc-1920`, `codeprobe-4cl6.2`,
+//   followed by any number of numeric `.N` child segments (e.g. `gc-1920`, `codeprobe-4cl6.2`,
 //   `code-intel-digest-mp5`). Strip the suffix to get the project.
 //
 // - Sessions: `rig` is a filesystem root path; basename = project.
@@ -25,7 +25,7 @@ import type { SupervisorMailItem } from '../supervisor/mailReads';
 // - Mail: `rig` is already a project name (e.g. "my-city"); use
 //   directly. When absent, fall back to "(no rig)".
 
-const BEAD_ID_RX = /^(.+?)-[a-z0-9]+(?:\.\d+)?$/i;
+const BEAD_ID_RX = /^(.+?)-[a-z0-9]+(?:\.\d+)*$/i;
 
 export function beadProject(bead: SupervisorBead): string {
   const m = BEAD_ID_RX.exec(bead.id);
