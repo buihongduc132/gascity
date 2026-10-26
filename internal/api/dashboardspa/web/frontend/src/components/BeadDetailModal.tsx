@@ -1,6 +1,8 @@
 import { useState, type ReactNode } from 'react';
 import { resolveSessionForTarget } from 'gas-city-dashboard-shared';
 import type { BeadNode } from '../lib/beadGraph';
+import { BOARD_COLUMNS } from '../lib/beadGraph';
+import { beadHoldReason, isAggregateBead, isWorkflowControl } from '../lib/beadState';
 import { useBeadDetail } from '../hooks/useBeadDetail';
 import { useEntityLinks } from '../hooks/useEntityLinks';
 import type { SupervisorBead } from '../supervisor/beadReads';
@@ -84,7 +86,9 @@ export function BeadDetailModal({
             <span>
               <code className="text-fg-muted">{bead.id}</code>
               {' · '}
-              {bead.issue_type}
+              {isWorkflowControl(bead)
+                ? `workflow control (${bead.metadata?.['gc.kind']})`
+                : bead.issue_type}
               {' · P'}
               {bead.priority == null ? '—' : bead.priority}
             </span>
@@ -113,6 +117,23 @@ export function BeadDetailModal({
           <p className="text-fg-muted italic">No bead.</p>
         ) : (
           <div className="space-y-8">
+            <div className="space-y-1 text-body text-fg-muted">
+              {depNode && (
+                <p>
+                  Board state: {BOARD_COLUMNS.find((column) => column.id === depNode.column)?.label}
+                </p>
+              )}
+              <p>
+                Recorded lifecycle: <code>{bead.status}</code>
+              </p>
+              {beadHoldReason(bead) !== null && <p>{beadHoldReason(bead)}</p>}
+              {isAggregateBead(bead) && (
+                <p>
+                  This container summarizes child work; its assignee does not identify each
+                  executing worker.
+                </p>
+              )}
+            </div>
             <BeadBody bead={bead} />
             {depNode && (
               <BeadDependencies

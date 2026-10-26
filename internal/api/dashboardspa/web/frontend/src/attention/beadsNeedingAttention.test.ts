@@ -154,7 +154,7 @@ describe('stalled in-progress detection (gp-6xd)', () => {
       ...overrides,
     });
 
-  it('marks an in-progress bead with no assignee as stalled', () => {
+  it('marks an in-progress bead with no assignee as needing an accountable owner', () => {
     const rows = select({
       beads: [
         bead({ id: 'B-doing', status: 'in_progress', updated_at: '2026-06-07T10:00:00.000Z' }),
@@ -163,24 +163,19 @@ describe('stalled in-progress detection (gp-6xd)', () => {
     expect(rows).toEqual([
       expect.objectContaining({
         beadId: 'B-doing',
-        reason: 'stalled',
+        reason: 'unassigned',
         severity: 'attention',
-        summary: expect.stringContaining('no assignee'),
+        summary: expect.stringContaining('Needs accountable owner'),
       }),
     ]);
   });
 
-  it('marks an in-progress bead as stalled when no session resolves to the assignee', () => {
+  it('does not infer a stall when an assignee is outside the native session roster', () => {
     const rows = select({
       beads: [inProgress()],
       sessions: [session({ session_name: 'someone-else' })],
     });
-    expect(rows[0]).toEqual(
-      expect.objectContaining({
-        reason: 'stalled',
-        summary: expect.stringContaining('no live session for worker-ci-1'),
-      }),
-    );
+    expect(rows).toEqual([]);
   });
 
   it('marks an in-progress bead as stalled when its session is not in a live state', () => {
@@ -438,7 +433,7 @@ describe('inProgressCardNote (gp-6xd)', () => {
     expect(note).toBe('worker-ci-1 · active 8m ago');
   });
 
-  it('shows the stalled reason when the session is gone', () => {
+  it('shows runtime unknown when no native session resolves', () => {
     const note = inProgressCardNote(
       bead({
         status: 'in_progress',
@@ -448,8 +443,8 @@ describe('inProgressCardNote (gp-6xd)', () => {
       [],
       NOW,
     );
-    expect(note).toContain('stalled');
-    expect(note).toContain('no live session');
+    expect(note).toContain('runtime unknown');
+    expect(note).not.toContain('stalled');
   });
 
   it('shows the waiting reason for a checkpoint-held bead', () => {

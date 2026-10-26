@@ -24,6 +24,7 @@ function bead(id: string, status: BeadStatus, extra: Partial<SupervisorBead> = {
     title: `bead ${id}`,
     status,
     issue_type: 'task',
+    ...(status === 'in_progress' ? { assignee: 'worker-a' } : {}),
     created_at: '2026-05-01T00:00:00Z',
     ...extra,
   };
@@ -44,7 +45,15 @@ function renderBoard(
 describe('BeadBoard', () => {
   it('renders every status column as a labelled section', () => {
     renderBoard([bead('A', 'open')]);
-    for (const label of ['ready', 'open', 'in progress', 'blocked', 'done']) {
+    for (const label of [
+      'ready',
+      'open',
+      'in progress',
+      'blocked',
+      'needs owner',
+      'stalled',
+      'done',
+    ]) {
       expect(screen.getByRole('region', { name: label })).toBeTruthy();
     }
   });
@@ -66,13 +75,22 @@ describe('BeadBoard', () => {
     expect(onSelect).toHaveBeenCalledWith('A');
   });
 
+  it('does not count tracking or hierarchy edges as blocking prerequisites', () => {
+    renderBoard([
+      bead('A', 'open'),
+      bead('B', 'open', { dependencies: [{ issue_id: 'B', depends_on_id: 'A', type: 'tracks' }] }),
+    ]);
+    expect(screen.queryByText(/prerequisites/)).toBeNull();
+    expect(screen.queryByText(/dependents/)).toBeNull();
+  });
+
   it('annotates a row with its dependency neighbourhood (full tree lives in the modal)', () => {
     // B needs A: B carries a `needs 1` annotation; A (downstream) carries
     // `blocks 1`. The navigable tree itself moved to BeadDependencies — see
     // BeadDependencies.test — so the row only summarises the counts.
     renderBoard([bead('A', 'closed'), bead('B', 'open', { needs: ['A'] })]);
-    expect(screen.getByText(/needs 1/)).toBeTruthy();
-    expect(screen.getByText(/blocks 1/)).toBeTruthy();
+    expect(screen.getByText(/prerequisites 1/)).toBeTruthy();
+    expect(screen.getByText(/dependents 1/)).toBeTruthy();
   });
 
   it('scrolls the selected bead row into view on initial deep-link selection', () => {
@@ -92,7 +110,7 @@ describe('BeadBoard', () => {
     // navigable dependency tree lives in the bead detail modal.
     renderBoard([bead('A', 'closed'), bead('B', 'open', { needs: ['A'] })], 'B', onSelect);
     const ready = screen.getByRole('region', { name: 'ready' });
-    expect(within(ready).getByText(/needs 1/)).toBeTruthy();
+    expect(within(ready).getByText(/prerequisites 1/)).toBeTruthy();
     expect(within(ready).queryByTitle('Select A')).toBeNull();
     fireEvent.click(within(ready).getByTitle('Select B'));
     expect(onSelect).toHaveBeenCalledWith('B');

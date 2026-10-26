@@ -5,6 +5,7 @@ import type {
 } from 'gas-city-dashboard-shared/gc-supervisor';
 import { activeCityOrThrow } from '../api/cityBase';
 import { SupervisorApiError, supervisorApi } from './client';
+import { isBoardBead } from '../lib/beadState';
 
 export type SupervisorBead = Bead;
 
@@ -14,6 +15,10 @@ export interface SupervisorBeadList extends Omit<ListBodyBead, 'items' | 'total'
   upstream_total?: number;
   upstream_fetched: number;
   fetch_limit: number;
+  /** Full-city relationship window when the visible list is rig-scoped. */
+  graph_items?: SupervisorBead[];
+  graph_upstream_total?: number;
+  graph_upstream_fetched?: number;
 }
 
 export interface ListSupervisorBeadsOptions {
@@ -31,20 +36,6 @@ export interface ListSupervisorBeadsOptions {
 const BEADS_FETCH_LIMIT = 1000;
 const ASSIGNED_BEADS_FETCH_LIMIT = 200;
 const DETAIL_FALLBACK_FETCH_LIMIT = 1000;
-// The "real work" bead types the board fans out (one typed query each),
-// then keeps via defaultBeadFilter — the bookkeeping types
-// (message/session/molecule/…) are dropped. Every entry MUST be a type the
-// live gc/bd backend accepts as a `type=` filter: a rig-scoped include-closed
-// (`all=true`) query for a type the backend rejects fails closed (HTTP 503
-// "invalid issue type") and that one rejected leg blanks the whole board.
-const ENGINEERING_BEAD_TYPES: ReadonlySet<string> = new Set([
-  'feature',
-  'bug',
-  'task',
-  'epic',
-  'chore',
-  'decision',
-]);
 
 export async function listSupervisorBeads(
   options: ListSupervisorBeadsOptions = {},
@@ -74,14 +65,25 @@ export async function listSupervisorBeads(
     options.signal === undefined
       ? supervisorApi().listBeads(cityName, query)
       : supervisorApi().listBeads(cityName, query, options.signal);
-  const [list, inProgress] = await Promise.all([
+  const [list, inProgress, cityGraph] = await Promise.all([
     listWith(baseQuery),
     listWith(inProgressQuery).catch(() => null),
+    rigFilter.length === 0
+      ? Promise.resolve(null)
+      : listSupervisorBeads({
+          city: cityName,
+          includeClosed,
+          includeBookkeeping: true,
+          limit,
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+        }),
   ]);
   const windowItems = uniqueById(list.items ?? []);
   const items = uniqueById([...windowItems, ...(inProgress?.items ?? [])]);
   const statusFiltered = includeClosed ? items : items.filter((bead) => bead.status !== 'closed');
-  const filtered = includeBookkeeping ? statusFiltered : statusFiltered.filter(defaultBeadFilter);
+  const filtered = includeBookkeeping
+    ? statusFiltered
+    : statusFiltered.filter((bead) => isBoardBead(bead));
   const upstreamTotal = countAsNumber(list.total);
   return {
     items: filtered,
@@ -93,6 +95,15 @@ export async function listSupervisorBeads(
     // truncation notice precisely when window beads really were dropped.
     upstream_fetched: windowItems.length,
     fetch_limit: limit,
+    ...(cityGraph === null
+      ? {}
+      : {
+          graph_items: uniqueById([...statusFiltered, ...cityGraph.items]),
+          ...(cityGraph.upstream_total === undefined
+            ? {}
+            : { graph_upstream_total: cityGraph.upstream_total }),
+          graph_upstream_fetched: cityGraph.upstream_fetched,
+        }),
   };
 }
 
@@ -148,13 +159,6 @@ export async function fetchSupervisorBead(id: string): Promise<SupervisorBead> {
   }
 }
 
-function defaultBeadFilter(bead: SupervisorBead): boolean {
-  if (!ENGINEERING_BEAD_TYPES.has(bead.issue_type)) return false;
-  if (Array.isArray(bead.labels) && bead.labels.some((label) => label.startsWith('gc:'))) {
-    return false;
-  }
-  return true;
-}
 function countAsNumber(value: ListBodyBead['total']): number | undefined {
   if (typeof value === 'number') return value;
   if (typeof value === 'bigint') return Number(value);

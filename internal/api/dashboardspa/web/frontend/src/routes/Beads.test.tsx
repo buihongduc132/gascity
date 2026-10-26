@@ -195,13 +195,13 @@ describe('BeadsPage', () => {
       target: { value: 'east' },
     });
 
-    await waitFor(() => expect(beadQueries.length).toBe(4));
-    // Both legs of the fresh read carry the rig filter.
-    const latestQuery = beadQueries.at(-1);
-    expect(latestQuery?.get('rig')).toBe('east');
-    expect(latestQuery?.has('all')).toBe(false);
-    expect(latestQuery?.has('type')).toBe(false);
-    expect(beadQueries.at(-2)?.get('rig')).toBe('east');
+    await waitFor(() => expect(beadQueries.length).toBe(6));
+    // Native rig queries define display membership. The accompanying full-city
+    // pair preserves cross-rig dependency truth without guessing a bead's rig.
+    const freshQueries = beadQueries.slice(2);
+    expect(freshQueries.filter((query) => query.get('rig') === 'east')).toHaveLength(2);
+    expect(freshQueries.filter((query) => !query.has('rig'))).toHaveLength(2);
+    expect(freshQueries.every((query) => !query.has('all') && !query.has('type'))).toBe(true);
   });
 
   it('lists only real rig names in the rig dropdown — no filesystem paths or non-rig dirs', async () => {

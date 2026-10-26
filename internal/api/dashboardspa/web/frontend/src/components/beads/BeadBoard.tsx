@@ -31,7 +31,7 @@ export function BeadBoard({
   onSelect,
 }: BeadBoardProps) {
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-x-8 gap-y-8">
+    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-x-8 gap-y-8">
       {BOARD_COLUMNS.map((col) => {
         const nodes = columns[col.id];
         const isBlocked = col.id === 'blocked';

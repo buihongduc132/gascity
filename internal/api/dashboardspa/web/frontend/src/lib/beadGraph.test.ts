@@ -11,6 +11,7 @@ function bead(id: string, status: BeadStatus, extra: Partial<SupervisorBead> = {
     title: `bead ${id}`,
     status,
     issue_type: 'task',
+    ...(status === 'in_progress' ? { assignee: 'worker-a' } : {}),
     created_at: '2026-05-01T00:00:00Z',
     ...extra,
   };
@@ -99,9 +100,9 @@ describe('buildBeadGraph — column placement', () => {
     expect(columnOf([bead('A', 'closed'), bead('B', 'open', { needs: ['A'] })], 'B')).toBe('ready');
   });
 
-  it('keeps an open bead with an unmet need in the open column, not ready', () => {
+  it('places an open bead with an unmet need in blocked, not ready', () => {
     const graph = buildBeadGraph([bead('A', 'open'), bead('B', 'open', { needs: ['A'] })]);
-    expect(graph.nodes.get('B')?.column).toBe('open');
+    expect(graph.nodes.get('B')?.column).toBe('blocked');
     expect(graph.nodes.get('B')?.ready).toBe(false);
   });
 

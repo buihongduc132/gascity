@@ -4,7 +4,10 @@ import { GC_EVENT_PREFIX } from 'gas-city-dashboard-shared';
 import { formatApiError } from '../api/client';
 import { getActiveCity } from '../api/cityBase';
 import { useAttentionModel } from '../attention/context';
-import { inProgressCardNote } from '../attention/beadsNeedingAttention';
+import {
+  inProgressCardNote,
+  selectBeadsNeedingAttention,
+} from '../attention/beadsNeedingAttention';
 import { resourceAttentionSeverity } from '../attention/routeHighlight';
 import { BeadAttentionPanel } from '../components/beads/BeadAttentionPanel';
 import { BeadBoardSection } from '../components/beads/BeadBoardSection';
@@ -17,7 +20,8 @@ import { PageHeader } from '../components/PageHeader';
 import { StatusBadge } from '../components/StatusBadge';
 import { useNow } from '../contexts/NowContext';
 import { READ_ONLY_CONTROL_TITLE, ReadOnlyBadge, useReadOnly } from '../contexts/ReadOnlyContext';
-import { buildBeadGraph } from '../lib/beadGraph';
+import { BOARD_COLUMNS, buildBeadGraph, type BeadGraph } from '../lib/beadGraph';
+import { isBoardBead, isWorkflowControl } from '../lib/beadState';
 import { resolveRigName, rigNameOptions } from '../lib/rigNames';
 import { useCachedData } from '../hooks/useCachedData';
 import { useGcEventRefresh } from '../hooks/useGcEvents';
@@ -45,13 +49,6 @@ interface ActionMessage {
   tone: 'ok' | 'error';
   text: string;
 }
-
-const BEAD_CHIPS: ReadonlyArray<FilterChip<SupervisorBead>> = [
-  { id: 'open', label: 'open', match: (b) => b.status === 'open' },
-  { id: 'in_progress', label: 'in progress', match: (b) => b.status === 'in_progress' },
-  { id: 'blocked', label: 'blocked', match: (b) => b.status === 'blocked' },
-  { id: CLOSED_CHIP_ID, label: 'closed', match: (b) => b.status === 'closed' },
-];
 
 const BEAD_SEARCH_FIELDS = (b: SupervisorBead): ReadonlyArray<string | undefined> => [
   b.id,
@@ -82,6 +79,7 @@ export function BeadsPage() {
   // four status controls reading as one group while `closed` alone widens
   // the data scope.
   const [showClosed, setShowClosed] = useState(false);
+  const [showControls, setShowControls] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(selectedBeadParam);
   const [closing, setClosing] = useState<SupervisorBead | null>(null);
   const [actionInFlight, setActionInFlight] = useState<string | null>(null);
@@ -99,11 +97,12 @@ export function BeadsPage() {
     () =>
       listSupervisorBeads({
         includeClosed: showClosed,
+        includeBookkeeping: true,
         ...(rigFilter === RIG_FILTER_ALL ? {} : { rigFilter }),
       }),
   );
-  const rows = useMemo(() => data?.items ?? [], [data]);
-  const totalShown = data?.total ?? 0;
+  const rows = useMemo(() => data?.graph_items ?? data?.items ?? [], [data]);
+  const displayRows = useMemo(() => data?.items ?? [], [data]);
   const upstreamTotal = data?.upstream_total;
   const upstreamFetched = data?.upstream_fetched;
   const fetchLimit = data?.fetch_limit;
@@ -151,14 +150,55 @@ export function BeadsPage() {
     }
   }, [dispatchRigOptions, rigFilter]);
 
-  const filteredRows = rows;
+  // Resolve dependencies against the entire fetched window before display
+  // filters hide records. Search and workflow toggles must not change truth.
+  const nowMs = useNow();
+  const sessionsForNotes = useMemo(
+    () =>
+      sessions.data === undefined || sessions.data.partial === true
+        ? undefined
+        : (sessions.data.items ?? []),
+    [sessions.data],
+  );
+  const stalledIds = useMemo(
+    () =>
+      new Set(
+        selectBeadsNeedingAttention(
+          {
+            beads: rows,
+            escalations: [],
+            ...(sessionsForNotes === undefined ? {} : { sessions: sessionsForNotes }),
+          },
+          nowMs,
+        )
+          .filter((row) => row.reason === 'stalled')
+          .map((row) => row.beadId),
+      ),
+    [rows, sessionsForNotes, nowMs],
+  );
+  const graph = useMemo(() => buildBeadGraph(rows, { stalledIds }), [rows, stalledIds]);
+  const filteredRows = useMemo(
+    () => displayRows.filter((bead) => isBoardBead(bead, showControls)),
+    [displayRows, showControls],
+  );
+  const totalShown = filteredRows.length;
+  const hiddenControls = useMemo(() => displayRows.filter(isWorkflowControl).length, [displayRows]);
+  const beadChips: ReadonlyArray<FilterChip<SupervisorBead>> = useMemo(
+    () =>
+      BOARD_COLUMNS.map((column) => ({
+        id: column.id === 'done' ? CLOSED_CHIP_ID : column.id,
+        label: column.id === 'done' ? 'closed' : column.label,
+        match: (bead: SupervisorBead) => graph.nodes.get(bead.id)?.column === column.id,
+      })),
+    [graph],
+  );
 
   const filters = useListFilters<SupervisorBead>({
     viewKey: 'beads',
     rows: filteredRows,
     projectOf: beadProject,
     searchOf: BEAD_SEARCH_FIELDS,
-    chips: BEAD_CHIPS,
+    chips: beadChips,
   });
 
   // The `closed` chip is special: besides being a client-side filter (like
@@ -264,7 +304,6 @@ export function BeadsPage() {
   }, [newAgent, newBody, newRig, newTitle, readOnly, refresh]);
 
   const matched = useMemo(() => filters.groups.flatMap((group) => group.rows), [filters.groups]);
-  const graph = useMemo(() => buildBeadGraph(matched), [matched]);
   const groupIds = useMemo(() => {
     const map = new Map<string, Set<string>>();
     for (const group of filters.groups) {
@@ -273,8 +312,8 @@ export function BeadsPage() {
     return map;
   }, [filters.groups]);
   const selectedBead = useMemo(
-    () => matched.find((bead) => bead.id === selectedId) ?? null,
-    [matched, selectedId],
+    () => rows.find((bead) => bead.id === selectedId) ?? null,
+    [rows, selectedId],
   );
   const selectedNode = useMemo(
     () => (selectedId === null ? null : (graph.nodes.get(selectedId) ?? null)),
@@ -294,14 +333,6 @@ export function BeadsPage() {
   // every assigned card "no live session" against an empty roster. The
   // app-level 1s clock keeps ages advancing and lets a quiet card cross the
   // stalled threshold without a data refresh.
-  const nowMs = useNow();
-  const sessionsForNotes = useMemo(
-    () =>
-      sessions.data === undefined || sessions.data.partial === true
-        ? undefined
-        : (sessions.data.items ?? []),
-    [sessions.data],
-  );
   const beadNoteOf = useMemo(() => {
     const notes = new Map<string, string>();
     for (const bead of matched) {
@@ -350,8 +381,9 @@ export function BeadsPage() {
   );
 
   const synopsis = useMemo(
-    () => (hasLoadedBoard ? buildSynopsis(filteredRows, totalShown, rigFilter) : 'Loading beads.'),
-    [filteredRows, hasLoadedBoard, totalShown, rigFilter],
+    () =>
+      hasLoadedBoard ? buildSynopsis(filteredRows, graph, totalShown, rigFilter) : 'Loading beads.',
+    [filteredRows, graph, hasLoadedBoard, totalShown, rigFilter],
   );
 
   const isTruncated =
@@ -427,6 +459,15 @@ export function BeadsPage() {
             </button>
           </p>
         )}
+        {data?.graph_upstream_total !== undefined &&
+          data.graph_upstream_fetched !== undefined &&
+          data.graph_upstream_fetched < data.graph_upstream_total && (
+            <p className="text-warn">
+              City dependency window covered {data.graph_upstream_fetched} of{' '}
+              {data.graph_upstream_total} records. Missing prerequisite state remains unknown unless
+              the supervisor reports it clear.
+            </p>
+          )}
         {actionMessage && (
           <p
             className={actionMessage.tone === 'error' ? 'text-accent' : 'text-fg-muted'}
@@ -450,11 +491,19 @@ export function BeadsPage() {
         />
         <div className="flex flex-wrap items-baseline gap-x-8 gap-y-3">
           <FilterChips
-            chips={BEAD_CHIPS}
+            chips={beadChips}
             activeIds={filters.activeChipIds}
             onToggle={toggleStatusChip}
-            legend="Status"
+            legend="Board state"
           />
+          <label className="flex items-center gap-2 text-label text-fg-muted">
+            <input
+              type="checkbox"
+              checked={showControls}
+              onChange={(event) => setShowControls(event.target.checked)}
+            />
+            Show workflow controls ({hiddenControls})
+          </label>
           {dispatchRigOptions.length > 1 && (
             <label className="flex items-baseline gap-2 text-label">
               <span className="uppercase tracking-wider text-fg-muted">Rig</span>
@@ -664,17 +713,16 @@ function normalizeSelectedBeadParam(value: string | null): string | null {
 
 function buildSynopsis(
   filtered: ReadonlyArray<SupervisorBead>,
+  graph: BeadGraph,
   totalShown: number,
   rigFilter: string,
 ): string {
   if (rigFilter !== RIG_FILTER_ALL && filtered.length === 0) return `No beads on ${rigFilter}.`;
-  const open = filtered.filter((bead) => bead.status === 'open').length;
-  const inProgress = filtered.filter((bead) => bead.status === 'in_progress').length;
-  const blocked = filtered.filter((bead) => bead.status === 'blocked').length;
   const parts: string[] = [];
-  if (open > 0) parts.push(`${open} open`);
-  if (inProgress > 0) parts.push(`${inProgress} in progress`);
-  if (blocked > 0) parts.push(`${blocked} blocked`);
+  for (const column of BOARD_COLUMNS) {
+    const count = filtered.filter((bead) => graph.nodes.get(bead.id)?.column === column.id).length;
+    if (count > 0) parts.push(`${count} ${column.label}`);
+  }
   if (parts.length === 0) return 'Nothing on the queue.';
   let summary = `${parts.join(', ')}.`;
   if (rigFilter !== RIG_FILTER_ALL) summary = `${rigFilter}: ${summary}`;

@@ -84,6 +84,41 @@ describe('supervisor bead reads', () => {
     expect(listBeads).toHaveBeenCalledWith('captured-city', { limit: 1000 });
   });
 
+  it('keeps native rig membership separate from the full-city relationship window', async () => {
+    const local = bead({
+      id: 'local-leaf',
+      dependencies: [{ issue_id: 'local-leaf', depends_on_id: 'foreign-blocker', type: 'blocks' }],
+    });
+    const foreign = bead({ id: 'foreign-blocker' });
+    const control = bead({ id: 'workflow-root', metadata: { 'gc.kind': 'workflow' } });
+    const listBeads = vi.fn(async (_city: string, query: { rig?: string; status?: string }) => {
+      if (query.status === 'in_progress') return { items: [], total: 0 };
+      return query.rig === 'east'
+        ? { items: [local], total: 1 }
+        : { items: [local, foreign, control], total: 50 };
+    });
+    setSupervisorApiForTests({ ...baseApi, listBeads });
+
+    const result = await listSupervisorBeads({
+      city: 'captured-city',
+      rigFilter: 'east',
+      limit: 3,
+    });
+
+    expect(result.items.map((item) => item.id)).toEqual(['local-leaf']);
+    expect(result.graph_items?.map((item) => item.id)).toEqual([
+      'local-leaf',
+      'foreign-blocker',
+      'workflow-root',
+    ]);
+    expect(result.graph_upstream_total).toBe(50);
+    expect(result.graph_upstream_fetched).toBe(3);
+    expect(result.upstream_total).toBe(1);
+    expect(listBeads).toHaveBeenCalledWith('captured-city', { limit: 3, rig: 'east' });
+    expect(listBeads).toHaveBeenCalledWith('captured-city', { limit: 3 });
+    expect(listBeads).toHaveBeenCalledTimes(4);
+  });
+
   // gp-6xd F1: the windowed list is newest-created-first, so long-running
   // in-progress beads age out of it — exactly the beads the operator most
   // needs. A dedicated status=in_progress leg fetches that set whole and

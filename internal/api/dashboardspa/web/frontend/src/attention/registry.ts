@@ -468,6 +468,8 @@ function beadAttentionWord(reason: BeadAttentionReason): string {
       return 'waiting';
     case 'ready-unclaimed':
       return 'unclaimed';
+    case 'unassigned':
+      return 'needs owner';
   }
 }
 

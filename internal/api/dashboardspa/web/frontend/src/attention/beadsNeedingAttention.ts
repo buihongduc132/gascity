@@ -1,5 +1,6 @@
 import type { Bead } from 'gas-city-dashboard-shared/gc-supervisor';
 import { elapsedSince, formatElapsed, formatElapsedFine } from './elapsed';
+import { beadHoldReason, dependencyState, isAggregateBead } from '../lib/beadState';
 
 // gascity-dashboard-2j8e.3: the single selector behind the Beads nav badge AND
 // the /beads "Needs you" section. It counts beads that genuinely need the
@@ -40,8 +41,8 @@ const STALLED_INACTIVITY_MS = 60 * 60 * 1000;
 // nobody answered stops being invisible.
 const WAITING_ATTENTION_MS = 2 * 60 * 60 * 1000;
 
-// Session states that count as "the assignee is alive". Anything else —
-// drained, dead, error, unknown — means the session cannot be doing the work.
+// Native session states that do not establish a stopped worker. Transitional
+// states remain visibly unconfirmed; unknown or absent identity is not dead.
 const LIVE_SESSION_STATES: ReadonlySet<string> = new Set([
   'active',
   'awake',
@@ -96,9 +97,15 @@ const SESSION_ID_META_KEY = 'gc.session_id';
  * raised the escalation marker (a help-request / escalation); `ready-unclaimed`
  * is open work nobody claimed; `stalled` is in-progress work whose assignee
  * shows no sign of life; `waiting-human` is work parked on a named human
- * checkpoint. Plain dependency-blocked is none of these — excluded.
+ * checkpoint. `unassigned` identifies a missing accountable leaf owner;
+ * it does not assert that no external process exists.
  */
-export type BeadAttentionReason = 'ready-unclaimed' | 'escalated' | 'stalled' | 'waiting-human';
+export type BeadAttentionReason =
+  | 'ready-unclaimed'
+  | 'escalated'
+  | 'stalled'
+  | 'waiting-human'
+  | 'unassigned';
 
 /** The badge-driving severities — escalation acts now, stale unclaimed escalates. */
 export type BeadAttentionSeverity = 'attention' | 'watch';
@@ -144,6 +151,7 @@ export function selectBeadsNeedingAttention(
   nowMs: number,
 ): BeadAttentionRow[] {
   const rows: BeadAttentionRow[] = [];
+  const byId = new Map(inputs.beads.map((bead) => [bead.id, bead]));
   for (const bead of inputs.escalations) {
     const row = escalatedRow(bead);
     if (row !== null) rows.push(row);
@@ -154,7 +162,7 @@ export function selectBeadsNeedingAttention(
   for (const bead of inputs.beads) {
     const row =
       waitingHumanRow(bead, nowMs) ??
-      readyUnclaimedRow(bead, nowMs) ??
+      readyUnclaimedRow(bead, byId, nowMs) ??
       stalledRow(bead, inputs.sessions, nowMs);
     if (row !== null) rows.push(row);
   }
@@ -173,12 +181,24 @@ export function inProgressCardNote(
   nowMs: number,
 ): string | null {
   if (bead.status !== 'in_progress') return null;
+  const hold = beadHoldReason(bead);
+  if (hold === 'Permission hold' || hold === 'Paused by user') return hold;
   const waiting = waitingHumanRow(bead, nowMs);
   if (waiting !== null) return waiting.summary;
+  if (isAggregateBead(bead))
+    return bead.issue_type === 'epic'
+      ? 'Epic · child progress'
+      : 'Workflow control · child progress';
+  if (bead.is_blocked === true) return 'Waiting for prerequisites';
   const stalled = stalledRow(bead, sessions, nowMs);
   if (stalled !== null) return stalled.summary;
   const assignee = bead.assignee?.trim() ?? '';
-  const activityMs = lastActivityElapsedMs(bead, resolveSession(bead, sessions), nowMs);
+  const session = resolveSession(bead, sessions);
+  if (session === undefined) return `${assignee} · runtime unknown`;
+  if (!['active', 'awake'].includes(session.state.trim().toLowerCase())) {
+    return `${assignee} · session ${session.state || 'ended'} · execution unconfirmed`;
+  }
+  const activityMs = lastActivityElapsedMs(bead, session, nowMs);
   if (activityMs === null) return assignee.length > 0 ? assignee : null;
   const phrase = `active ${formatElapsedFine(activityMs)} ago`;
   return assignee.length > 0 ? `${assignee} · ${phrase}` : phrase;
@@ -201,8 +221,18 @@ function escalatedRow(bead: Bead): BeadAttentionRow | null {
 // normal churn does not inflate the badge. Plain dependency-blocked (bd
 // `blocked` = "blocked by a dependency") and in-progress/closed work are not
 // surfaced — only genuinely-claimable open beads.
-function readyUnclaimedRow(bead: Bead, nowMs: number): BeadAttentionRow | null {
-  if (bead.status !== 'open' || hasAssignee(bead)) return null;
+function readyUnclaimedRow(
+  bead: Bead,
+  byId: ReadonlyMap<string, Bead>,
+  nowMs: number,
+): BeadAttentionRow | null {
+  if (
+    bead.status !== 'open' ||
+    hasAssignee(bead) ||
+    isAggregateBead(bead) ||
+    dependencyState(bead, byId) !== 'clear'
+  )
+    return null;
   const ageMs = elapsedSince(bead.created_at, nowMs);
   if (ageMs === null || ageMs < READY_UNCLAIMED_WATCH_MS) return null;
   const stale = ageMs >= READY_UNCLAIMED_STALE_MS;
@@ -242,25 +272,33 @@ function waitingHumanRow(bead: Bead, nowMs: number): BeadAttentionRow | null {
   };
 }
 
-// Stalled: in-progress work whose assignee shows no sign of life — no assignee
-// at all, no session resolving to the assignee, a session in a non-live state,
-// or no activity (session last_active / bead heartbeat) for over an hour. When
-// the session read failed (`sessions` undefined), only the no-assignee check
-// runs: without session data we cannot distinguish "worker gone" from "worker
-// alive but not heartbeating", so we do not guess — a sessions outage must not
-// paint the board stalled.
+// Ownership and runtime evidence are distinct. Missing owners need repair;
+// only a resolved native session can establish an execution stall.
 function stalledRow(
   bead: Bead,
   sessions: readonly BeadAttentionSession[] | undefined,
   nowMs: number,
 ): BeadAttentionRow | null {
-  if (bead.status !== 'in_progress') return null;
+  if (
+    bead.status !== 'in_progress' ||
+    isAggregateBead(bead) ||
+    bead.is_blocked === true ||
+    beadHoldReason(bead) !== null
+  )
+    return null;
   const assignee = bead.assignee?.trim() ?? '';
-  const detail = stalledDetail(bead, assignee, sessions, nowMs);
+  if (assignee.length === 0) {
+    return {
+      beadId: bead.id,
+      reason: 'unassigned',
+      severity: 'attention',
+      summary: 'Needs accountable owner',
+      updatedAt: bead.updated_at ?? bead.created_at,
+    };
+  }
+  const detail = stalledDetail(bead, sessions, nowMs);
   if (detail === null) return null;
-  const ageMs = elapsedSince(bead.updated_at ?? bead.created_at, nowMs);
-  const phrase =
-    ageMs === null ? `stalled — ${detail}` : `stalled ${formatElapsed(ageMs)} — ${detail}`;
+  const phrase = `stalled — ${detail}`;
   return {
     beadId: bead.id,
     reason: 'stalled',
@@ -272,17 +310,18 @@ function stalledRow(
 
 function stalledDetail(
   bead: Bead,
-  assignee: string,
   sessions: readonly BeadAttentionSession[] | undefined,
   nowMs: number,
 ): string | null {
-  if (assignee.length === 0) return 'no assignee';
   if (sessions === undefined) return null;
   const session = resolveSession(bead, sessions);
   if (session === undefined) {
-    return `no live session for ${assignee}`;
+    // This can be a human, external runtime or unlinked identity. Absence from
+    // the native roster is not evidence that its physical worker disappeared.
+    return null;
   }
   const state = session.state.trim();
+  if (state.toLowerCase() === 'unknown') return null;
   if (!isLiveSession(state)) {
     // A closed session decodes to the empty state — "closed beads have no
     // runtime state" (internal/session/info_codec.go) — so name that case
@@ -308,9 +347,11 @@ function resolveSession(
   if (sessions === undefined) return undefined;
   const assignee = bead.assignee?.trim() ?? '';
   const sessionId = bead.metadata?.[SESSION_ID_META_KEY];
+  const sessionName = bead.metadata?.['gc.session_name'];
   const candidates = sessions.filter(
     (session) =>
       (sessionId !== undefined && session.id === sessionId) ||
+      (sessionName !== undefined && session.session_name === sessionName) ||
       (assignee.length > 0 &&
         (session.session_name === assignee ||
           session.alias === assignee ||

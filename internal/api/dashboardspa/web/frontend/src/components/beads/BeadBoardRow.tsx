@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import type { BeadNode } from '../../lib/beadGraph';
 import type { BadgeSeverity } from '../../attention/compose';
 import { attentionListItemProps } from '../../attention/routeHighlight';
+import { isBlockingRelation } from '../../lib/beadState';
 
 // One bead on the board, in the editorial register: a typeset row, no card,
 // no side-stripe. Selection is carried by weight + a leading "▸" + a warm
@@ -42,9 +43,10 @@ export function BeadBoardRow({
 }: BeadBoardRowProps) {
   const { bead, deps, blocks, hasUnresolvedDeps } = node;
   const rowRef = useRef<HTMLLIElement | null>(null);
-  const depCount = deps.length;
-  const blockCount = blocks.length;
+  const depCount = deps.filter((edge) => isBlockingRelation(edge.kind)).length;
+  const blockCount = blocks.filter((edge) => isBlockingRelation(edge.kind)).length;
   const hasNeighbourhood = depCount > 0 || blockCount > 0;
+  const displayNote = node.stateNote ?? note;
 
   const { className: attentionClassName = '', ...attentionProps } =
     attentionListItemProps(attentionSeverity);
@@ -89,22 +91,22 @@ export function BeadBoardRow({
           {bead.priority != null && <span className="tnum">P{bead.priority}</span>}
           {hasNeighbourhood && (
             <span className="tnum normal-case tracking-normal">
-              {depCount > 0 && `needs ${depCount}`}
+              {depCount > 0 && `prerequisites ${depCount}`}
               {depCount > 0 && blockCount > 0 && ' · '}
-              {blockCount > 0 && `blocks ${blockCount}`}
+              {blockCount > 0 && `dependents ${blockCount}`}
             </span>
           )}
           {hasUnresolvedDeps && (
             <span className="normal-case tracking-normal text-warn">unresolved</span>
           )}
         </span>
-        {note !== null && note.length > 0 && (
+        {displayNote !== null && displayNote.length > 0 && (
           <span
             className={`block pl-4 mt-0.5 text-label normal-case tracking-normal ${noteTone(
               attentionSeverity,
             )}`}
           >
-            {note}
+            {displayNote}
           </span>
         )}
       </button>

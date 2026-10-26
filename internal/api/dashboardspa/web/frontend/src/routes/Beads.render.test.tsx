@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setActiveCity } from '../api/cityBase';
@@ -34,6 +34,58 @@ afterEach(() => {
 });
 
 describe('BeadsPage supervisor reads', () => {
+  it('keeps native-blocked state and dependency resolution stable after search', async () => {
+    renderPage();
+    await screen.findByText('direct supervisor bead');
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search beads' }), {
+      target: { value: 'direct supervisor bead' },
+    });
+    expect(
+      within(screen.getByRole('region', { name: 'blocked' })).getByText('direct supervisor bead'),
+    ).toBeTruthy();
+    expect(screen.queryByText('unresolved')).toBeNull();
+  });
+
+  it('retains cross-rig prerequisites while displaying native rig membership', async () => {
+    renderPage();
+    await screen.findByText('parent bead');
+    fireEvent.change(screen.getByRole('combobox', { name: 'Rig filter' }), {
+      target: { value: 'east' },
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText('parent bead')).toBeNull();
+      expect(
+        within(screen.getByRole('region', { name: 'blocked' })).getByText('direct supervisor bead'),
+      ).toBeTruthy();
+    });
+    const row = within(screen.getByRole('region', { name: 'blocked' })).getByText(
+      'direct supervisor bead',
+    );
+    expect(screen.queryByText('unresolved')).toBeNull();
+    fireEvent.click(row);
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByRole('button', { name: /td-parent-1.*parent bead/ })).toBeTruthy();
+    expect(within(dialog).queryByText('unresolved')).toBeNull();
+  });
+
+  it('hides generated controls by default and exposes them through the explicit toggle', async () => {
+    renderPage();
+    await screen.findByText('direct supervisor bead');
+    expect(screen.queryByText('workflow container')).toBeNull();
+    fireEvent.click(screen.getByRole('checkbox', { name: /show workflow controls/i }));
+    expect(screen.getByText('workflow container')).toBeTruthy();
+    expect(screen.queryByText(/stalled.*no assignee/i)).toBeNull();
+  });
+
+  it('preserves a direct workflow-root link even while controls are hidden', async () => {
+    renderPage('/beads?bead=td-workflow-root');
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByRole('heading', { name: 'workflow container' })).toBeTruthy();
+    expect(within(dialog).getByText(/Recorded lifecycle:/)).toBeTruthy();
+    expect(within(dialog).getByText(/This container summarizes child work/)).toBeTruthy();
+  });
+
   it('shows only real current work without requesting the slow closed-history supervisor path', async () => {
     renderPage();
 
@@ -177,7 +229,13 @@ function stubFetch() {
       fetchCalls.push({ method, path: url.pathname, query: url.searchParams });
 
       if (url.pathname === '/v0/city/test-city/beads') {
-        return jsonResponse(beadListForQuery(url.searchParams.get('type')));
+        const list = beadListForQuery(url.searchParams.get('type'));
+        // The native API, not a field or ID prefix on the bead, owns membership.
+        if (url.searchParams.get('rig') === 'east') {
+          const items = list.items.filter((item) => item.id !== 'td-parent-1');
+          return jsonResponse({ items, total: items.length });
+        }
+        return jsonResponse(list);
       }
       if (url.pathname === '/v0/city/test-city/bead/td-window-miss') {
         return jsonResponse(
@@ -187,6 +245,9 @@ function stubFetch() {
             description: 'fetched by deep-link id',
           }),
         );
+      }
+      if (url.pathname === '/v0/city/test-city/bead/td-workflow-root') {
+        return jsonResponse(workflowRoot());
       }
       if (url.pathname === '/v0/city/test-city/bead/td-bead-abc123') {
         return jsonResponse(
@@ -243,8 +304,15 @@ function stubFetch() {
               running_count: 1,
               suspended: false,
             },
+            {
+              name: 'west',
+              path: '/home/ds/west',
+              agent_count: 0,
+              running_count: 0,
+              suspended: false,
+            },
           ],
-          total: 1,
+          total: 2,
         });
       }
       throw new Error(`unexpected fetch: ${url.pathname}${url.search}`);
@@ -273,8 +341,9 @@ function beadListForQuery(type: string | null): { items: SupervisorBead[]; total
           status: 'open',
           issue_type: 'bug',
         }),
+        workflowRoot(),
       ],
-      total: 3,
+      total: 4,
     };
   }
   if (type === 'bug') {
@@ -291,6 +360,16 @@ function beadListForQuery(type: string | null): { items: SupervisorBead[]; total
     };
   }
   return { items: [], total: 0 };
+}
+
+function workflowRoot(): SupervisorBead {
+  return bead({
+    id: 'td-workflow-root',
+    title: 'workflow container',
+    description: 'Coordinates child work',
+    status: 'in_progress',
+    metadata: { 'gc.kind': 'workflow' },
+  });
 }
 
 function bead(overrides: Partial<SupervisorBead>): SupervisorBead {

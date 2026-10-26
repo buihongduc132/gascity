@@ -1,4 +1,5 @@
 import type { SupervisorBead } from '../supervisor/beadReads';
+import { beadHoldReason, dependencyState, isAggregateBead, isBlockingRelation } from './beadState';
 
 // Pure dependency-graph + kanban-column builder for the Beads board
 // (gascity-dashboard-6frc). The board is "part kanban, part dependency
@@ -9,14 +10,20 @@ import type { SupervisorBead } from '../supervisor/beadReads';
 // Honesty discipline (inherited from prd_bead-linked-view.md): the fetched
 // bead list is a window, not the whole store. A dependency that points
 // outside the window resolves to `bead: null` and is rendered `unresolved`,
-// never fabricated. "Ready" is only claimed when every blocking need
-// resolves to a closed bead inside the window — an unresolved need means we
-// cannot prove readiness, so we do not assert it.
+// never fabricated. Native dependency state covers prerequisites omitted from
+// the window; without that evidence an unresolved blocking edge stays unknown.
 //
 // ZFC: pure structural inversion of supervisor-provided fields (`needs`,
-// `dependencies`, `status`). No scoring, no semantic classification.
+// `dependencies`, `is_blocked`, `status`, and explicit holds). No scoring.
 
-export type BoardColumnId = 'ready' | 'open' | 'in_progress' | 'blocked' | 'done';
+export type BoardColumnId =
+  | 'ready'
+  | 'open'
+  | 'in_progress'
+  | 'blocked'
+  | 'needs_owner'
+  | 'stalled'
+  | 'done';
 
 export interface BoardColumn {
   id: BoardColumnId;
@@ -30,6 +37,8 @@ export const BOARD_COLUMNS: readonly BoardColumn[] = [
   { id: 'open', label: 'open' },
   { id: 'in_progress', label: 'in progress' },
   { id: 'blocked', label: 'blocked' },
+  { id: 'needs_owner', label: 'needs owner' },
+  { id: 'stalled', label: 'stalled' },
   { id: 'done', label: 'done' },
 ];
 
@@ -61,10 +70,12 @@ export interface BeadNode {
   blocks: BeadBlockEdge[];
   /** Derived board column. */
   column: BoardColumnId;
-  /** Open + every blocking need resolves to a closed in-window bead. */
+  /** Executable open work whose blocking prerequisites and holds are clear. */
   ready: boolean;
-  /** Any upstream edge points outside the fetched window. */
+  /** A prerequisite is unresolved and no authoritative native clearance covers it. */
   hasUnresolvedDeps: boolean;
+  /** Primary explanation, independent of the preserved store lifecycle value. */
+  stateNote?: string;
 }
 
 export interface BeadGraph {
@@ -74,45 +85,38 @@ export interface BeadGraph {
   columns: Record<BoardColumnId, BeadNode[]>;
 }
 
-/** Upstream dependency ids for a bead, paired with their edge kind, deduped
- *  (first occurrence wins; `needs` is read before structured dependencies). */
+/** Preserve typed relationships, deduplicating equivalent blocking edges. */
 function depEntries(bead: SupervisorBead): ReadonlyArray<{ id: string; kind: string }> {
   const seen = new Set<string>();
   const entries: { id: string; kind: string }[] = [];
   for (const id of bead.needs ?? []) {
-    if (id.length === 0 || seen.has(id)) continue;
-    seen.add(id);
+    if (id.length === 0 || seen.has(`blocking:${id}`)) continue;
+    seen.add(`blocking:${id}`);
     entries.push({ id, kind: 'needs' });
   }
   for (const dep of bead.dependencies ?? []) {
     const id = dep.depends_on_id;
-    if (id.length === 0 || seen.has(id)) continue;
-    seen.add(id);
+    const key = `${isBlockingRelation(dep.type) ? 'blocking' : dep.type}:${id}`;
+    if (id.length === 0 || seen.has(key)) continue;
+    seen.add(key);
     entries.push({ id, kind: dep.type });
   }
   return entries;
 }
 
-/** Blocking-need ids only (the supervisor's explicit `needs` set), used for
- *  readiness. Structured `dependencies` of arbitrary type are shown in the
- *  graph but do not gate readiness — only `needs` is documented as
- *  "needs before it can run". */
-function blockingNeedIds(bead: SupervisorBead): readonly string[] {
-  return (bead.needs ?? []).filter((id) => id.length > 0);
-}
-
-function columnFor(node: { bead: SupervisorBead; ready: boolean }): BoardColumnId {
-  switch (node.bead.status) {
-    case 'in_progress':
-      return 'in_progress';
-    case 'blocked':
-      return 'blocked';
-    case 'closed':
-      return 'done';
-    case 'open':
-    default:
-      return node.ready ? 'ready' : 'open';
+function columnFor(
+  bead: SupervisorBead,
+  dependency: 'clear' | 'blocked' | 'unknown',
+  stalled: boolean,
+): BoardColumnId {
+  if (bead.status === 'closed') return 'done';
+  if (dependency === 'blocked') return 'blocked';
+  if (isAggregateBead(bead)) return 'open';
+  if (bead.status === 'in_progress') {
+    if ((bead.assignee?.trim().length ?? 0) === 0) return 'needs_owner';
+    return stalled ? 'stalled' : 'in_progress';
   }
+  return bead.status === 'open' && dependency === 'clear' ? 'ready' : 'open';
 }
 
 function byPriorityThenId(a: BeadNode, b: BeadNode): number {
@@ -122,7 +126,10 @@ function byPriorityThenId(a: BeadNode, b: BeadNode): number {
   return a.bead.id < b.bead.id ? -1 : a.bead.id > b.bead.id ? 1 : 0;
 }
 
-export function buildBeadGraph(beads: readonly SupervisorBead[]): BeadGraph {
+export function buildBeadGraph(
+  beads: readonly SupervisorBead[],
+  options: { stalledIds?: ReadonlySet<string> } = {},
+): BeadGraph {
   const byId = new Map<string, SupervisorBead>();
   for (const b of beads) byId.set(b.id, b);
 
@@ -136,10 +143,23 @@ export function buildBeadGraph(beads: readonly SupervisorBead[]): BeadGraph {
       kind,
       bead: byId.get(id) ?? null,
     }));
-    const hasUnresolvedDeps = deps.some((d) => d.bead === null);
-
-    const needs = blockingNeedIds(b);
-    const ready = b.status === 'open' && needs.every((id) => byId.get(id)?.status === 'closed');
+    const dependency = dependencyState(b, byId);
+    const hasUnresolvedDeps = dependency === 'unknown';
+    const column = columnFor(b, dependency, options.stalledIds?.has(b.id) ?? false);
+    const ready = column === 'ready';
+    const stateNote =
+      beadHoldReason(b) ??
+      (column === 'needs_owner'
+        ? 'Needs accountable owner'
+        : isAggregateBead(b)
+          ? b.issue_type === 'epic'
+            ? 'Epic · child progress'
+            : 'Workflow control · child progress'
+          : dependency === 'blocked'
+            ? 'Waiting for prerequisites'
+            : dependency === 'unknown'
+              ? 'Prerequisite state unknown'
+              : undefined);
 
     const node: BeadNode = {
       bead: b,
@@ -147,9 +167,9 @@ export function buildBeadGraph(beads: readonly SupervisorBead[]): BeadGraph {
       blocks: [],
       ready,
       hasUnresolvedDeps,
-      column: 'open',
+      column,
+      ...(stateNote === undefined ? {} : { stateNote }),
     };
-    node.column = columnFor(node);
     nodes.set(b.id, node);
 
     for (const dep of deps) {
@@ -184,6 +204,8 @@ function emptyColumns(): Record<BoardColumnId, BeadNode[]> {
     open: [],
     in_progress: [],
     blocked: [],
+    needs_owner: [],
+    stalled: [],
     done: [],
   };
 }
